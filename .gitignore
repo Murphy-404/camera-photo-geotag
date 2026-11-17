@@ -5,6 +5,8 @@
 !/package.json
 !/package-lock.json
 !/geotag.mjs
+!/gpx.mjs
+!/gpx.test.mjs
 !/jpeg.mjs
 !/match.mjs
 !/cli.test.mjs

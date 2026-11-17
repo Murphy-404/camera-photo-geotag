@@ -13,7 +13,7 @@ export function captureTime(value, offset, shiftSeconds = 0, fraction) {
   return Date.parse(`${timestamp}${offset}`) + shiftSeconds * 1000 + milliseconds;
 }
 
-function distanceMeters(a, b) {
+export function distanceMeters(a, b) {
   const radians = Math.PI / 180;
   const latitude = (b.latitude - a.latitude) * radians;
   const longitude = (b.longitude - a.longitude) * radians;

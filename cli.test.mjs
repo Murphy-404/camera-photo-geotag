@@ -88,6 +88,36 @@ test('真实入口确认后仅导出选中副本，保留原片、已有位置�
   assert.match(run('1\n').stdout, /目标已存在/);
   assert.deepEqual(await readFile(result), beforeRetry);
 
+  const track = join(root, '旅途.gpx');
+  const trackOutput = join(root, 'gpx-output');
+  await writeFile(track, `<gpx xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>
+    <trkpt lat="-25.125" lon="-100.251"><time>2026-11-17T01:59:55Z</time></trkpt>
+    <trkpt lat="-25.125" lon="-100.249"><time>2026-11-17T02:00:05Z</time></trkpt>
+  </trkseg></trk></gpx>`);
+  const gpxArgs = [cli, '--gpx', track, '--camera', camera, '--out', trackOutput,
+    '--camera-offset=+08:00', '--shift', '20', '--window', '10'];
+  const gpxRun = spawnSync(process.execPath, gpxArgs, { input: '1\n', encoding: 'utf8', timeout: 20_000 });
+  assert.equal(gpxRun.status, 2, gpxRun.stderr);
+  assert.match(gpxRun.stdout, /旅途\.gpx.*第 1 段.*插值估计/);
+  assert.match(gpxRun.stdout, /导出成功 1/);
+  assert.deepEqual(await readdir(trackOutput), ['01-相机.jpg']);
+  const [gpxMetadata] = JSON.parse(exif('-j', '-n', '-GPSLatitude', '-GPSLongitude', join(trackOutput, '01-相机.jpg')));
+  assert.equal(gpxMetadata.GPSLatitude, -25.125);
+  assert.equal(gpxMetadata.GPSLongitude, -100.25);
+  assert.deepEqual(await readFile(original), input);
+
+  const malformedTrack = join(root, 'malformed.gpx');
+  const forbiddenOutput = join(root, 'must-not-exist');
+  await writeFile(malformedTrack, '<gpx><trk></gpx>');
+  const rejected = spawnSync(process.execPath, [cli, '--gpx', malformedTrack, '--camera', camera, '--out', forbiddenOutput],
+    { input: 'all\n', encoding: 'utf8', timeout: 20_000 });
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /GPX 读取失败/);
+  await assert.rejects(readdir(forbiddenOutput), { code: 'ENOENT' });
+  const repeatedTrack = spawnSync(process.execPath, [...gpxArgs, '--gpx', track], { encoding: 'utf8', timeout: 20_000 });
+  assert.equal(repeatedTrack.status, 1);
+  assert.match(repeatedTrack.stderr, /每次只支持一个 GPX 文件/);
+
   const previousHash = await fileHash(untouched);
   await writeFile(untouched, 'changed after preview');
   await assert.rejects(exportCopy({ file: untouched, name: '02-camera.jpg', hash: previousHash,

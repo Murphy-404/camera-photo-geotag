@@ -1,16 +1,18 @@
-import { mkdir, readdir, realpath } from 'node:fs/promises';
-import { extname, join, resolve } from 'node:path';
+import { mkdir, readFile, readdir, realpath } from 'node:fs/promises';
+import { basename, extname, join, resolve } from 'node:path';
 import { stdin, stdout } from 'node:process';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { captureTime, suggestPosition, validOffset } from './match.mjs';
+import { parseGpx, suggestTrackPosition } from './gpx.mjs';
 import { exportCopy, fileHash, hasGps, position, readPhoto } from './jpeg.mjs';
 
-const usage = `用法：node geotag.mjs --phone <手机照片目录> --camera <相机JPEG目录> [--out <输出目录>]
+const usage = `用法：node geotag.mjs (--phone <手机照片目录> | --gpx <轨迹文件>) --camera <相机JPEG目录> [--out <输出目录>]
   --camera-offset=+08:00  拍摄时区偏移，指定后覆盖相机元数据
   --phone-offset=+08:00   手机照片缺少时区时的拍摄偏移
   --shift 20              加到相机原始拍摄时间的秒数，慢 20 秒就填 20，默认 0
-  --window 60             允许参考照片与校正后相机时间相差的秒数，默认 60
+  --window 60             参考照片或轨迹点与校正后相机时间的窗口秒数，默认 60
+  --max-gap 120           GPX 相邻采样点的最大连续间隔秒数，默认 120
   --preview               仅查看建议，可省略 --out`;
 
 const display = name => JSON.stringify(name);
@@ -44,34 +46,53 @@ async function readReferences(folder, fallback) {
   return references;
 }
 
+async function readTrack(file) {
+  try {
+    const xml = new TextDecoder('utf-8', { fatal: true }).decode(await readFile(file));
+    return parseGpx(xml);
+  } catch (error) {
+    throw new Error(`GPX 读取失败：${error.message}`);
+  }
+}
+
 async function main() {
   const { values } = parseArgs({ options: {
-    phone: { type: 'string' }, camera: { type: 'string' }, out: { type: 'string' },
+    phone: { type: 'string' }, gpx: { type: 'string', multiple: true }, camera: { type: 'string' }, out: { type: 'string' },
     'phone-offset': { type: 'string' }, 'camera-offset': { type: 'string' },
     shift: { type: 'string', default: '0' }, window: { type: 'string', default: '60' },
+    'max-gap': { type: 'string', default: '120' },
     preview: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
   } });
   if (values.help) return console.log(usage);
-  if (!values.phone || !values.camera || (!values.preview && !values.out)) throw new Error(usage);
+  if (values.gpx?.length > 1) throw new Error('每次只支持一个 GPX 文件');
+  const gpx = values.gpx?.[0];
+  if (Boolean(values.phone) === Boolean(gpx) || !values.camera || (!values.preview && !values.out)) throw new Error(usage);
   const shift = Number(values.shift);
   const window = Number(values.window);
+  const maxGap = Number(values['max-gap']);
   if (!values.shift.trim() || !Number.isFinite(shift) || Math.abs(shift) > 86400 ||
       !values.window.trim() || !Number.isFinite(window) || window < 0 || window > 86400) {
     throw new Error('校时和匹配窗口须为有效秒数，最大 86400 秒');
   }
+  if (!Number.isFinite(maxGap) || maxGap <= 0 || maxGap > 86400) throw new Error('GPX 连续间隔须大于 0 且不超过 86400 秒');
   for (const value of [values['phone-offset'], values['camera-offset']]) {
     if (value !== undefined && !validOffset(value)) throw new Error('请输入有效的拍摄 UTC 偏移，例如 +08:00');
   }
 
-  const phone = await realpath(resolve(values.phone));
+  const phone = values.phone ? await realpath(resolve(values.phone)) : undefined;
   const camera = await realpath(resolve(values.camera));
   if (phone === camera) throw new Error('请把手机参考照片和相机照片放入不同目录');
-  const references = await readReferences(phone, values['phone-offset']);
-  if (!references.length) throw new Error('没有可用的手机参考照片');
+  const track = gpx ? await readTrack(resolve(gpx)) : undefined;
+  const references = phone ? await readReferences(phone, values['phone-offset']) : undefined;
+  if (track && !track.usable) throw new Error(`GPX 没有带有效时间和坐标的轨迹点（跳过 ${track.skipped} 点）`);
+  if (references && !references.length) throw new Error('没有可用的手机参考照片');
   const rows = [];
   let failed = 0;
   let skipped = 0;
-  console.log(`有效参考照片 ${references.length} 张，相机时钟修正 ${shift} 秒，匹配窗口 ±${window} 秒`);
+  const source = track
+    ? `GPX ${display(basename(gpx))}：${track.segmentCount} 段，有效轨迹点 ${track.usable} 个，跳过 ${track.skipped} 点，连续间隔上限 ${maxGap} 秒`
+    : `有效参考照片 ${references.length} 张`;
+  console.log(`${source}，相机时钟修正 ${shift} 秒，匹配窗口 ±${window} 秒`);
   for (const name of await filesIn(camera, ['.jpg', '.jpeg'])) {
     const file = join(camera, name);
     try {
@@ -79,15 +100,22 @@ async function main() {
       const tags = await readPhoto(file);
       if (hash !== await fileHash(file)) throw new Error('源照片正在变化');
       const time = timeFrom(tags, values['camera-offset'] ?? tags['ExifIFD:OffsetTimeOriginal'], shift);
-      const suggestion = hasGps(tags) ? { reason: '已有 GPS，保留原位置' } : suggestPosition(time, references, window);
+      let suggestion;
+      if (hasGps(tags)) suggestion = { reason: '已有 GPS，保留原位置' };
+      else if (track) suggestion = suggestTrackPosition(time, track, window, maxGap);
+      else suggestion = suggestPosition(time, references, window);
       if (suggestion.reason) {
         skipped++;
         console.log(`${display(name)}：跳过（${suggestion.reason}）`);
         continue;
       }
-      const { reference, seconds } = suggestion;
+      const { seconds } = suggestion;
+      const reference = track ? suggestion : suggestion.reference;
+      const evidence = track
+        ? `GPX ${display(basename(gpx))} 第 ${suggestion.segment} 段，${suggestion.method}，距最近采样 ${seconds} 秒`
+        : `参考 ${display(reference.name)}，相差 ${seconds} 秒`;
       rows.push({ name, file, tags, hash, reference });
-      console.log(`${rows.length}. ${display(name)} → ${reference.latitude}, ${reference.longitude}（参考 ${display(reference.name)}，相差 ${seconds} 秒，匹配时间 ${new Date(time).toISOString()}）`);
+      console.log(`${rows.length}. ${display(name)} → ${reference.latitude}, ${reference.longitude}（${evidence}，匹配时间 ${new Date(time).toISOString()}）`);
     } catch {
       failed++;
       console.log(`${display(name)}：读取或校验失败`);
