@@ -1,0 +1,11 @@
+{
+  "name": "camera-photo-geotag",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "files": ["geotag.mjs", "jpeg.mjs", "match.mjs", "*.test.mjs", "fixtures/synthetic.jpg"],
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test" },
+  "dependencies": { "exiftool-vendored": "39.3.0" }
+}

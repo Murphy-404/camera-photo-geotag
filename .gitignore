@@ -1,0 +1,14 @@
+/*
+!/.gitignore
+!/LICENSE
+!/README.md
+!/package.json
+!/package-lock.json
+!/geotag.mjs
+!/jpeg.mjs
+!/match.mjs
+!/cli.test.mjs
+!/match.test.mjs
+!/fixtures/
+/fixtures/*
+!/fixtures/synthetic.jpg
